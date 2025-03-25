@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/IRBuilder.h"
@@ -17,6 +18,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -31,7 +33,7 @@ public:
 char AFLCoverage::ID = 0;
 bool AFLCoverage::runOnModule(Module &M) {
   /*
-     afl-part of the instrument pass
+    1. afl-part of the instrument pass
     afl should behave normally on this instrument to make AFL based fuzzer
     normally run
   */
@@ -137,16 +139,32 @@ bool AFLCoverage::runOnModule(Module &M) {
   }
 
   /*
+     2. instrument of all call instruction
      we do not return here, AFL pass has done instrument at every BasicBlock
      we will go on to instrument on every call
      this do not create extra brach or new BasicBlock
   */
   // return true;
 
+  int func_count_fd = open("/home/emiya/Desktop/experiment_aflnet/func_count.txt", O_RDWR | O_CREAT, 0666);
+  if(func_count_fd < 0){
+    errs() << "[!] function list fd failed \n";
+  }
+  char buf[100];
+  memset(buf, 0x0, 100);
+  lseek(func_count_fd, 0, SEEK_SET);
+  read(func_count_fd, buf, 100);
+  u32 counter = atoi(buf);
+  errs() << "read counter @@@@@@@@@@@@@ " << counter << "\n";
+  int func_list_fd = open("/home/emiya/Desktop/experiment_aflnet/func_list.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
+  if(func_list_fd < 0){
+    errs() << "[!] function list fd failed \n";
+  }
+
   FunctionType *fstate_extract_type =
       FunctionType::get(Int32Ty, ArrayRef<Type *>(), false);
   FunctionType *fname_store_function =
-      FunctionType::get(Int32Ty, {PointerType::get(Int8Ty, 0)}, false);
+      FunctionType::get(Int32Ty, {Int32Ty}, false);
 
   // ptr for shm to store call trace
   GlobalVariable *fstate_shm_ptr =
@@ -158,78 +176,73 @@ bool AFLCoverage::runOnModule(Module &M) {
       M.getOrInsertFunction("fstate_extract", fstate_extract_type);
   auto em_fname_store =
       M.getOrInsertFunction("fname_store", fname_store_function);
-  // iter all instructions to get all call site
+
+  // iter all functions to instrument at first site of function
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    for (BasicBlock &B : F) {
-      for (Instruction &I : B) {
-        if (auto *CI = dyn_cast<CallInst>(&I)) {
-          /*
-             call fstate_extract to extract state of statefuzzer
-             result is int32 Type
-             %fuzzer_state value stored in the callinst
-          */
-          if (CI->getCalledFunction()->getName() == "fstate_extract" ||
-              CI->getCalledFunction()->getName() == "fname_store" ||
-              CI->getCalledFunction()->getName().startswith("llvm"))
-            continue;
-          int fn_len = CI->getCalledFunction()->getName().size() + 4;
-          IRBuilder<> IRB(CI);
-          CallInst *fstate_call =
-              IRB.CreateCall(em_fstate_extract, None, "fuzzer_state");
-          /*
-            store the total length of state code and function name to shm
-            |  length  | state code |    callee function    |
+    BasicBlock &entry_block = F.front();
+    IRBuilder<> IRB(&*entry_block.getFirstInsertionPt());
+    if (F.getName().find("llvm", 0) != StringRef::npos)
+      continue;
+    CallInst *fstate_call =
+      IRB.CreateCall(em_fstate_extract, None, "fuzzer_state");
+    /*
+      store the state code and function CODE to shm
+      | state code | function code |
+      fstate_shm_ptr is a variable that stores ptr
+      its name specifies not the addr ptr points-to but the addr itself
+      we should first read it from variable
 
-            fstate_shm_ptr is a variable that stores ptr
-            its name specifies not the addr ptr points-to but the addr itself
-            we should first read it from variable
+      25-3-24 instrument update
+      1. it's too big to store all callsites and function name, the length will bring extra mem cost
+      2. call functions in shared libs such as libc brings much cost
+    */
+   
+    LoadInst *obj_ptr = IRB.CreateLoad(fstate_shm_ptr);
+      obj_ptr->setMetadata(M.getMDKindID("nosanitize"),
+                            MDNode::get(C, None));
+    Value *cast_obj = IRB.CreateBitCast(
+      obj_ptr, PointerType::get(Int32Ty, 0), "casted_ptr");
+    IRB.CreateStore(fstate_call, cast_obj)
+      ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      
+    /*
+      update pointer
+    */
+   
+    Value *add_res = IRB.CreateGEP(
+      Int8Ty, obj_ptr, ConstantInt::get(Int32Ty, 4), "moved ptr");
+    IRB.CreateStore(add_res, fstate_shm_ptr)
+      ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      
+    /*
+      store fname
+    */
+    counter++;
+    char record[0x100];
+    memset(record, 0x0, 0x100);
+    sprintf(record, "%d %s\n", counter, F.getName().str().c_str());
+    write(func_list_fd, record, strlen(record));
 
-         */
-          LoadInst *obj_ptr = IRB.CreateLoad(fstate_shm_ptr);
-          obj_ptr->setMetadata(M.getMDKindID("nosanitize"),
-                               MDNode::get(C, None));
-          Value *cast_obj = IRB.CreateBitCast(
-              obj_ptr, PointerType::get(Int32Ty, 0), "casted_ptr");
-          IRB.CreateStore(ConstantInt::get(Int32Ty, fn_len), cast_obj)
-              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-          /*
-             update pointer
-          */
-          Value *add_res = IRB.CreateGEP(
-              Int8Ty, obj_ptr, ConstantInt::get(Int32Ty, 4), "moved ptr");
-          IRB.CreateStore(add_res, fstate_shm_ptr)
-              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-          /*
-             Store the fstate
-          */
-          obj_ptr = IRB.CreateLoad(fstate_shm_ptr);
-          obj_ptr->setMetadata(M.getMDKindID("nosanitize"),
-                               MDNode::get(C, None));
-          cast_obj = IRB.CreateBitCast(obj_ptr, PointerType::get(Int32Ty, 0),
-                                       "casted_ptr");
-          IRB.CreateStore(fstate_call, cast_obj)
-              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-          /*
-             update pointer
-          */
-          add_res = IRB.CreateGEP(Int8Ty, obj_ptr, ConstantInt::get(Int32Ty, 4),
-                                  "moved ptr");
-          IRB.CreateStore(add_res, fstate_shm_ptr)
-              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-          /*
-             store fname
-          */
-          std::vector<Value *> fname_store_args;
-          Value *fname_str =
-              IRB.CreateGlobalStringPtr(CI->getCalledFunction()->getName());
-          fname_store_args.push_back(fname_str);
-          IRB.CreateCall(em_fname_store, fname_store_args, "fname_store");
-        }
-      }
-    }
+    std::vector<Value *> fname_store_args;
+    ConstantInt *fname_code = ConstantInt::get(Int32Ty, counter);
+    fname_store_args.push_back(fname_code);
+    IRB.CreateCall(em_fname_store, fname_store_args, "fname_store");
+    
   }
+  char count_str[100];
+  memset(count_str, 0x0, 100);
+  sprintf(count_str, "%d", counter);
+  lseek(func_count_fd, 0, SEEK_SET);
+  write(func_count_fd, count_str, 100);
+  errs()<< "function !!!!!!!!!!!!!!! ctr is set to " << count_str << "\n";
+  close(func_list_fd);
+  close(func_count_fd);
+  /*
+    3.fuzzer state extraction
+
+  */
   return true;
 }
 static void registerAFLPass(const PassManagerBuilder &,
