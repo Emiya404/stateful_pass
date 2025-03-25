@@ -94,7 +94,7 @@ __attribute__((destructor)) void end_fstate_tracer() {
     u8* cur_obj = __fstate_shm_start;
     *(u32*)__fstate_shm_ptr = 0xdeadbeef;
     write(log_file_fd, "=========--new-flow-trace--=========\n", 38);
-    while(count < MAP_SIZE && *(u32*)cur_obj != 0xdeadbeef){
+    while(count < (MAP_SIZE << 10) && *(u32*)cur_obj != 0xdeadbeef){
       char log_buf[0x100];
       
       u32 fstate = *(u32*)cur_obj;

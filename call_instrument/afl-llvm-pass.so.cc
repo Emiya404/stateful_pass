@@ -155,7 +155,6 @@ bool AFLCoverage::runOnModule(Module &M) {
   lseek(func_count_fd, 0, SEEK_SET);
   read(func_count_fd, buf, 100);
   u32 counter = atoi(buf);
-  errs() << "read counter @@@@@@@@@@@@@ " << counter << "\n";
   int func_list_fd = open("/home/emiya/Desktop/experiment_aflnet/func_list.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
   if(func_list_fd < 0){
     errs() << "[!] function list fd failed \n";
@@ -169,7 +168,7 @@ bool AFLCoverage::runOnModule(Module &M) {
   // ptr for shm to store call trace
   GlobalVariable *fstate_shm_ptr =
       new GlobalVariable(M, PointerType::get(Int8Ty, 0), false,
-                         GlobalValue::ExternalLinkage, 0, "__fstate_shm_ptr");
+                        GlobalValue::ExternalLinkage, 0, "__fstate_shm_ptr");
 
   // new function to extract fuzzer state
   auto em_fstate_extract =
@@ -236,13 +235,34 @@ bool AFLCoverage::runOnModule(Module &M) {
   sprintf(count_str, "%d", counter);
   lseek(func_count_fd, 0, SEEK_SET);
   write(func_count_fd, count_str, 100);
-  errs()<< "function !!!!!!!!!!!!!!! ctr is set to " << count_str << "\n";
   close(func_list_fd);
   close(func_count_fd);
   /*
     3.fuzzer state extraction
-
   */
+#ifdef AFL_NET_STATE_AWARE
+  /*
+    for AFLNET, we should be aware of state change as soon as the response sent
+    not until the client receive the response
+
+    For openssl
+    on linux platform, openssl send network messages by write (BIO_write implementation)
+    However, 
+  */
+  
+#endif
+
+#ifdef STATEAFL_STATE_AWARE
+  /* 
+    for STATEAFL, we can not get accurate state code when running
+    we record abstract state code
+    at the end, map the abstract code to the accurate state code
+  */
+  /*
+    3.1 implement STATEAFL instrument it self
+  */
+ 
+#endif
   return true;
 }
 static void registerAFLPass(const PassManagerBuilder &,
